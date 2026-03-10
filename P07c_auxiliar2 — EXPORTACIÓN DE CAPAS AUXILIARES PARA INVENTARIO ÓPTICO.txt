@@ -1,0 +1,135 @@
+// ============================================================================
+// P07c_auxiliar — EXPORTACIÓN DE CAPAS AUXILIARES PARA INVENTARIO ÓPTICO
+// Proyecto: InSAR Deslizamientos — Zona de Intag, Cotacachi, Ecuador
+// Fecha: 28 de febrero de 2026
+// Protocolo: Maestro InSAR Intag v2.0 — Fase 1, Paso 1.1
+//
+// PROPÓSITO:
+//   Exportar pendiente (SRTM 30m) y cobertura del suelo
+//   (ESA WorldCover 2021) al mismo CRS, resolución y extensión que
+//   los rasters P07 de Sentinel-2 (EPSG:32617, 10 m).
+//
+// NOTA TÉCNICA:
+//   Se usa SRTM GL1 (USGS) en lugar de Copernicus GLO-30 porque
+//   ee.Terrain.slope() falla con la colección Copernicus DEM
+//   (ImageCollection requiere .mosaic() previo, lo cual genera
+//   artefactos de NoData en los bordes de tiles). SRTM es una
+//   imagen única global sin este problema.
+//   Ambos DEMs tienen resolución nativa de ~30 m y precisión vertical
+//   comparable para cálculo de pendiente.
+//
+// SALIDAS (Google Drive → INTAG_InSAR_P07):
+//   P07c_slope_deg.tif    — pendiente en grados (float32)
+//   P07c_worldcover.tif   — clasificación ESA WorldCover 2021 (uint8)
+//
+// REFERENCIAS:
+//   - SRTM GL1: Farr et al. (2007), Rev. Geophys. 45, RG2004
+//   - ESA WorldCover 2021 v200: doi.org/10.5281/zenodo.7254221
+//   - Notti et al. (2023): NHESS 23:2625-2648 (umbral pendiente ≥ 15°)
+// ============================================================================
+
+// --- AOI: mismo asset que P07 ---
+var aoi = ee.FeatureCollection('projects/snappy-beaker-464417-d9/assets/AOI_INTAG');
+var aoiGeom = aoi.geometry();
+
+// --- PARÁMETROS DE EXPORTACIÓN (coinciden con P07) ---
+var CRS = 'EPSG:32617';
+var SCALE = 10;  // metros — resolución de Sentinel-2
+
+// ============================================================================
+// 1. PENDIENTE desde SRTM GL1 (30 m)
+// ============================================================================
+
+// SRTM GL1 es una imagen única global — sin problemas de mosaico
+var dem = ee.Image('USGS/SRTMGL1_003');
+
+// Calcular pendiente en grados
+var slope = ee.Terrain.slope(dem).clip(aoiGeom).rename('slope_deg');
+
+// Estadísticas de verificación
+var slopeStats = slope.reduceRegion({
+  reducer: ee.Reducer.minMax().combine(ee.Reducer.mean(), '', true),
+  geometry: aoiGeom,
+  scale: 30,
+  maxPixels: 1e9
+});
+print('=== PENDIENTE SRTM ===');
+print('Estadísticas (grados):', slopeStats);
+
+// ============================================================================
+// 2. COBERTURA DEL SUELO — ESA WorldCover 2021 v200
+// ============================================================================
+
+// Cargar WorldCover 2021 (resolución nativa 10 m)
+var worldcover = ee.ImageCollection('ESA/WorldCover/v200')
+  .first()
+  .clip(aoiGeom)
+  .rename('worldcover');
+
+// Clases ESA WorldCover:
+// 10 = Tree cover
+// 20 = Shrubland
+// 30 = Grassland
+// 40 = Cropland
+// 50 = Built-up
+// 60 = Bare / sparse vegetation
+// 70 = Snow and ice
+// 80 = Permanent water bodies
+// 90 = Herbaceous wetland
+// 95 = Mangroves
+// 100 = Moss and lichen
+
+// Estadísticas de clases
+var histogram = worldcover.reduceRegion({
+  reducer: ee.Reducer.frequencyHistogram(),
+  geometry: aoiGeom,
+  scale: 10,
+  maxPixels: 1e9
+});
+print('=== ESA WORLDCOVER 2021 ===');
+print('Histograma de clases:', histogram);
+
+// Píxeles de exclusión (agua + urbano)
+var exclusionMask = worldcover.eq(80).or(worldcover.eq(50)).rename('exclusion_mask');
+var nExcluded = exclusionMask.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: aoiGeom,
+  scale: 10,
+  maxPixels: 1e9
+});
+print('Píxeles excluidos (agua + urbano):', nExcluded);
+
+// ============================================================================
+// 3. EXPORTACIONES
+// ============================================================================
+
+// 3.1 Pendiente (remuestreada a 10 m con bilinear para suavizar)
+Export.image.toDrive({
+  image: slope.toFloat(),
+  description: 'P07c_slope_deg',
+  folder: 'INTAG_InSAR_P07',
+  fileNamePrefix: 'P07c_slope_deg',
+  region: aoiGeom,
+  crs: CRS,
+  scale: SCALE,
+  maxPixels: 1e9
+});
+
+// 3.2 WorldCover (nearest neighbor — datos categóricos)
+Export.image.toDrive({
+  image: worldcover.toUint8(),
+  description: 'P07c_worldcover',
+  folder: 'INTAG_InSAR_P07',
+  fileNamePrefix: 'P07c_worldcover',
+  region: aoiGeom,
+  crs: CRS,
+  scale: SCALE,
+  maxPixels: 1e9
+});
+
+print('');
+print('=== EXPORTACIONES LANZADAS ===');
+print('Ejecutar las 2 tareas en la pestaña Tasks');
+print('Destino: Google Drive / INTAG_InSAR_P07');
+print('CRS: ' + CRS + ' | Resolución: ' + SCALE + ' m');
+print('Archivos: P07c_slope_deg.tif, P07c_worldcover.tif');

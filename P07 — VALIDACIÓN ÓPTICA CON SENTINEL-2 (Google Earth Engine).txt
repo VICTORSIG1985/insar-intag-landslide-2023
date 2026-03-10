@@ -1,0 +1,374 @@
+// ============================================================================
+// P07 — VALIDACIÓN ÓPTICA CON SENTINEL-2 (Google Earth Engine)
+// ============================================================================
+// Proyecto : Detección de deslizamientos mediante InSAR — Intag, Cotacachi
+// Evento   : 19 de diciembre de 2023
+// Objetivo : Generar mapas continuos de cambio espectral (dNDVI, dNBR, dBSI)
+//            pre vs post evento para validación cruzada con clústeres InSAR (P06)
+// Plataforma: Google Earth Engine (JavaScript API) — Code Editor
+// Autor    : Víctor (UTN — Maestría en Tecnologías Geoespaciales)
+// Fecha    : febrero 2026
+//
+// FUNDAMENTACIÓN METODOLÓGICA:
+// ────────────────────────────────────────────────────────────────────────
+//
+// 1. ENMASCARAMIENTO DE NUBES — Cloud Score+ (cs = 0.4)
+//
+//    Nicolau et al. (2024) "Cloud Score+ in Action: Land Cover Mapping
+//    in Ecuador" evaluó tres métodos de enmascaramiento de nubes
+//    (QA60, s2cloudless, Cloud Score+) específicamente en la provincia
+//    de Imbabura, Ecuador — la misma provincia de este estudio.
+//    Resultados:
+//    - Solo Cloud Score+ recuperó píxeles útiles sobre el volcán
+//      Cotacachi, donde los otros dos métodos enmascararon todo.
+//    - Se realizó análisis de sensibilidad con umbrales cs = 0.4, 0.5,
+//      0.6, 0.7. Los autores seleccionaron cs = 0.4 para maximizar
+//      cobertura manteniendo calidad aceptable.
+//    - La banda 'cs' fue superior a 'cs_cdf' para la mayor parte
+//      de la provincia.
+//    - La clasificación con Cloud Score+ (cs=0.4) mejoró 2% en
+//      precisión global vs. QA60, y 1% vs. s2cloudless.
+//    Este script adopta cs = 0.4 — el mismo valor validado por
+//    Nicolau et al. para Imbabura.
+//    Ref: medium.com/google-earth/cloud-score-in-action-land-cover
+//         -mapping-in-ecuador-fd1c5c424317
+//    Código: github.com/SERVIR-Amazonia/imbabura
+//
+// 2. COMPOSITE MEDIANA
+//
+//    Simonetti et al. (2021) "Pan-tropical Sentinel-2 cloud-free
+//    annual composite datasets" (Data in Brief, 39:107488) validó
+//    el uso de mediana per-banda tras enmascaramiento de nubes
+//    para generar composites libres de nubes en regiones tropicales,
+//    procesados en GEE. Los autores procesaron todo el cinturón
+//    tropical incluyendo Ecuador, usando todas las imágenes disponibles
+//    del año sin filtro previo de nubosidad por escena.
+//
+// 3. ÍNDICES ESPECTRALES BI-TEMPORALES
+//
+//    a) dNDVI (Mondini et al., 2011; Fiorucci et al., 2019; Notti
+//       et al., 2023): El NDVI es el índice más utilizado para
+//       detección de deslizamientos en zonas vegetadas. La diferencia
+//       temporal detecta pérdida de vegetación por remoción de masa.
+//    b) dNBR (Key & Benson, 2006; adaptado por Handwerger et al.,
+//       2022): Sensible a cambios en humedad del suelo y biomasa.
+//       Convención: NBR_pre - NBR_post (positivo = pérdida).
+//    c) dBSI (Ariza & Dávila, 2021; Sentinel Hub Landslide Detection):
+//       Bare Soil Index para detección de suelo expuesto post-evento.
+//       Convención: BSI_post - BSI_pre (positivo = más suelo expuesto).
+//
+// 4. UMBRALES DE CLASIFICACIÓN — NO SE APLICAN AQUÍ
+//
+//    Notti et al. (2023, NHESS 23:2625-2648) establece explícitamente:
+//    "This threshold does not have a fixed value, as reported in the
+//    literature (Hölbling et al., 2015; Mondini et al., 2011). An
+//    operator manually determines it after a visual assessment of
+//    NDVIvar, the comparison on GEE of the NDVI time series between
+//    affected and not affected areas, and the calibration of the
+//    parameters based on a PL-ML inventory comparison (back analysis)."
+//    En su zona de estudio (Piemonte, Italia), encontraron un rango
+//    óptimo de -0.20 a -0.15, pero advierten que varía por caso.
+//
+//    Por lo tanto, este script exporta MAPAS CONTINUOS sin clasificar.
+//    Los umbrales se determinan empíricamente en P07b (Python) mediante:
+//    - Extracción de valores dNDVI en clústeres InSAR de P06
+//    - Comparación estadística con puntos de control aleatorios
+//    - Análisis de distribución para identificar el umbral óptimo
+//    - Validación cruzada con reportes del GAD Cotacachi
+//
+// 5. VENTANAS TEMPORALES
+//
+//    PRE:  2023-08-01 a 2023-12-15 (4.5 meses, termina 4 días antes)
+//    POST: 2024-01-01 a 2024-04-30 (4 meses, inicia 13 días después)
+//
+//    Justificación:
+//    - En bosque nublado tropical, ventanas de 3-6 meses son necesarias
+//      para acumular suficientes observaciones libres de nubes
+//      (Simonetti et al., 2021).
+//    - La ventana pre-evento evita incluir el evento mismo.
+//    - La ventana post-evento excluye los primeros 13 días para evitar
+//      contaminación por nubes extremas asociadas al evento de lluvia
+//      que detonó los deslizamientos. Se inicia el 1 de enero por
+//      claridad temporal y suficiente separación del evento.
+//    - El conteo de observaciones válidas (n_obs) se exporta como
+//      mapa de calidad para evaluar la robustez del composite en
+//      cada punto.
+//
+// ────────────────────────────────────────────────────────────────────────
+// USO:
+//   1. Pegar este script en GEE Code Editor
+//   2. Ejecutar (Run)
+//   3. Revisar en consola: conteo de imágenes y observaciones medias
+//   4. Inspeccionar visualmente las capas en el mapa
+//   5. Lanzar las 7 exportaciones (pestaña Tasks)
+//   6. Descargar GeoTIFFs a D:/POSGRADOS/INTAG/data/S2_validacion/
+//   7. Ejecutar P07b en Spyder para análisis estadístico y umbrales
+// ============================================================================
+
+// ────────────────────────────────────────────────────────────────────────────
+// SECCIÓN 1: PARÁMETROS
+// ────────────────────────────────────────────────────────────────────────────
+
+// AOI — Polígono de las 6 parroquias afectadas (asset GEE)
+var AOI_fc = ee.FeatureCollection(
+  'projects/snappy-beaker-464417-d9/assets/AOI_INTAG'
+);
+var AOI = AOI_fc.geometry();
+
+// Ventanas temporales
+var PRE_INICIO  = '2023-08-01';
+var PRE_FIN     = '2023-12-15';
+var POST_INICIO = '2024-01-01';
+var POST_FIN    = '2024-04-30';
+
+// Cloud Score+ umbral — Nicolau et al. (2024) para Imbabura
+var CS_THRESHOLD = 0.4;
+
+// Carpeta de exportación en Google Drive
+var EXPORT_FOLDER = 'INTAG_InSAR_P07';
+
+// ────────────────────────────────────────────────────────────────────────────
+// SECCIÓN 2: COLECCIONES
+// ────────────────────────────────────────────────────────────────────────────
+
+var S2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED');
+var csPlus = ee.ImageCollection(
+  'GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED'
+);
+
+// ────────────────────────────────────────────────────────────────────────────
+// SECCIÓN 3: FUNCIONES
+// ────────────────────────────────────────────────────────────────────────────
+
+// Vincular Cloud Score+ a cada imagen S2 por system:index
+function linkCloudScore(s2Col) {
+  return ee.ImageCollection(
+    ee.Join.saveFirst('cs_image').apply({
+      primary: s2Col,
+      secondary: csPlus,
+      condition: ee.Filter.equals({
+        leftField: 'system:index',
+        rightField: 'system:index'
+      })
+    })
+  );
+}
+
+// Enmascarar con Cloud Score+ y escalar a reflectancia [0,1]
+function maskAndScale(image) {
+  var cs = ee.Image(image.get('cs_image')).select('cs');
+  return image.updateMask(cs.gte(CS_THRESHOLD))
+              .divide(10000)
+              .copyProperties(image, ['system:time_start']);
+}
+
+// Índices espectrales
+function addIndices(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  var nbr  = image.normalizedDifference(['B8', 'B12']).rename('NBR');
+  var bsi  = image.expression(
+    '((SWIR + RED) - (NIR + BLUE)) / ((SWIR + RED) + (NIR + BLUE))',
+    { SWIR: image.select('B11'), RED: image.select('B4'),
+      NIR:  image.select('B8'),  BLUE: image.select('B2') }
+  ).rename('BSI');
+  return image.addBands(ndvi).addBands(nbr).addBands(bsi);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SECCIÓN 4: PROCESAMIENTO
+// ────────────────────────────────────────────────────────────────────────────
+
+// Colecciones filtradas por AOI y fecha
+// Sin filtro CLOUDY_PIXEL_PERCENTAGE: Cloud Score+ opera a nivel de
+// píxel, no de escena. Simonetti et al. (2021) procesó todas las
+// imágenes disponibles para composites tropicales.
+var s2_pre  = S2.filterBounds(AOI).filterDate(PRE_INICIO, PRE_FIN);
+var s2_post = S2.filterBounds(AOI).filterDate(POST_INICIO, POST_FIN);
+
+// Vincular CS+, enmascarar, escalar, calcular índices
+var pre_col  = linkCloudScore(s2_pre).map(maskAndScale).map(addIndices);
+var post_col = linkCloudScore(s2_post).map(maskAndScale).map(addIndices);
+
+// Composites mediana (Simonetti et al., 2021)
+var pre_med  = pre_col.median().clip(AOI);
+var post_med = post_col.median().clip(AOI);
+
+// ────────────────────────────────────────────────────────────────────────────
+// SECCIÓN 5: MAPAS DE CAMBIO (continuos, sin clasificar)
+// ────────────────────────────────────────────────────────────────────────────
+
+// dNDVI = post - pre → negativo = pérdida de vegetación
+var dNDVI = post_med.select('NDVI').subtract(pre_med.select('NDVI'))
+            .rename('dNDVI');
+
+// dNBR = pre - post → positivo = pérdida de biomasa/humedad
+var dNBR = pre_med.select('NBR').subtract(post_med.select('NBR'))
+           .rename('dNBR');
+
+// dBSI = post - pre → positivo = más suelo expuesto
+var dBSI = post_med.select('BSI').subtract(pre_med.select('BSI'))
+           .rename('dBSI');
+
+// Conteo de observaciones válidas por píxel (calidad del composite)
+var n_obs_pre  = pre_col.select('NDVI').count().rename('n_obs_pre');
+var n_obs_post = post_col.select('NDVI').count().rename('n_obs_post');
+
+// ────────────────────────────────────────────────────────────────────────────
+// SECCIÓN 6: DIAGNÓSTICO
+// ────────────────────────────────────────────────────────────────────────────
+
+print('============================================================');
+print('P07 — VALIDACIÓN ÓPTICA SENTINEL-2');
+print('       Cloud Score+ (cs >= ' + CS_THRESHOLD + ')');
+print('       Nicolau et al. (2024) — Imbabura, Ecuador');
+print('============================================================');
+
+// Conteo de imágenes
+print('Imágenes disponibles PRE  (' + PRE_INICIO + ' → ' + PRE_FIN + '):',
+      s2_pre.size());
+print('Imágenes con CS+ PRE:', pre_col.size());
+print('Imágenes disponibles POST (' + POST_INICIO + ' → ' + POST_FIN + '):',
+      s2_post.size());
+print('Imágenes con CS+ POST:', post_col.size());
+
+// Trazabilidad: fechas de las imágenes
+print('IDs imágenes PRE:', pre_col.aggregate_array('system:index'));
+print('IDs imágenes POST:', post_col.aggregate_array('system:index'));
+
+// Calidad del composite: observaciones medias por píxel
+print('Obs. válidas medias PRE:', n_obs_pre.reduceRegion({
+  reducer: ee.Reducer.mean(), geometry: AOI, scale: 100,
+  maxPixels: 1e9, bestEffort: true}));
+print('Obs. válidas medias POST:', n_obs_post.reduceRegion({
+  reducer: ee.Reducer.mean(), geometry: AOI, scale: 100,
+  maxPixels: 1e9, bestEffort: true}));
+
+// Estadísticas de dNDVI (descriptivas, no umbrales)
+print('=== Estadísticas dNDVI en AOI ===');
+print(dNDVI.reduceRegion({
+  reducer: ee.Reducer.mean()
+            .combine(ee.Reducer.stdDev(), '', true)
+            .combine(ee.Reducer.min(), '', true)
+            .combine(ee.Reducer.max(), '', true)
+            .combine(ee.Reducer.percentile([5, 25, 50, 75, 95]), '', true),
+  geometry: AOI, scale: 30, maxPixels: 1e9, bestEffort: true
+}));
+
+// ────────────────────────────────────────────────────────────────────────────
+// SECCIÓN 7: VISUALIZACIÓN
+// ────────────────────────────────────────────────────────────────────────────
+
+Map.centerObject(AOI, 11);
+
+// RGB composites
+Map.addLayer(pre_med, {bands:['B4','B3','B2'], min:0, max:0.3},
+             'RGB Pre', false);
+Map.addLayer(post_med, {bands:['B4','B3','B2'], min:0, max:0.3},
+             'RGB Post', false);
+
+// NDVI
+var vis_ndvi = {min:0, max:0.8,
+  palette: ['red','yellow','green','darkgreen']};
+Map.addLayer(pre_med.select('NDVI'), vis_ndvi, 'NDVI Pre', false);
+Map.addLayer(post_med.select('NDVI'), vis_ndvi, 'NDVI Post', false);
+
+// Mapas de cambio continuo
+var vis_div = {min:-0.3, max:0.3, palette: [
+  '#d73027','#fc8d59','#fee08b','#ffffbf','#d9ef8b','#91cf60','#1a9850']};
+Map.addLayer(dNDVI, vis_div, 'dNDVI (continuo)', true);
+Map.addLayer(dNBR, {min:-0.3, max:0.3, palette: [
+  '#1a9850','#91cf60','#d9ef8b','#ffffbf','#fee08b','#fc8d59','#d73027']},
+  'dNBR (continuo)', false);
+Map.addLayer(dBSI, vis_div, 'dBSI (continuo)', false);
+
+// Calidad
+Map.addLayer(n_obs_pre, {min:0, max:30, palette:['white','blue']},
+             'N obs Pre', false);
+Map.addLayer(n_obs_post, {min:0, max:30, palette:['white','blue']},
+             'N obs Post', false);
+
+// AOI
+Map.addLayer(AOI_fc.style({color:'yellow', fillColor:'00000000', width:2}),
+             {}, 'Parroquias', true);
+
+// ────────────────────────────────────────────────────────────────────────────
+// SECCIÓN 8: EXPORTACIONES
+// ────────────────────────────────────────────────────────────────────────────
+// Todos los rasters continuos, CRS EPSG:32617, 10 m
+
+Export.image.toDrive({
+  image: dNDVI, description: 'P07_dNDVI',
+  folder: EXPORT_FOLDER, fileNamePrefix: 'P07_dNDVI',
+  region: AOI, scale: 10, crs: 'EPSG:32617',
+  maxPixels: 1e9, fileFormat: 'GeoTIFF'
+});
+
+Export.image.toDrive({
+  image: dNBR, description: 'P07_dNBR',
+  folder: EXPORT_FOLDER, fileNamePrefix: 'P07_dNBR',
+  region: AOI, scale: 10, crs: 'EPSG:32617',
+  maxPixels: 1e9, fileFormat: 'GeoTIFF'
+});
+
+Export.image.toDrive({
+  image: dBSI, description: 'P07_dBSI',
+  folder: EXPORT_FOLDER, fileNamePrefix: 'P07_dBSI',
+  region: AOI, scale: 10, crs: 'EPSG:32617',
+  maxPixels: 1e9, fileFormat: 'GeoTIFF'
+});
+
+Export.image.toDrive({
+  image: n_obs_pre.addBands(n_obs_post).toInt16(),
+  description: 'P07_n_obs',
+  folder: EXPORT_FOLDER, fileNamePrefix: 'P07_n_obs',
+  region: AOI, scale: 10, crs: 'EPSG:32617',
+  maxPixels: 1e9, fileFormat: 'GeoTIFF'
+});
+
+Export.image.toDrive({
+  image: pre_med.select('NDVI'), description: 'P07_NDVI_pre',
+  folder: EXPORT_FOLDER, fileNamePrefix: 'P07_NDVI_pre',
+  region: AOI, scale: 10, crs: 'EPSG:32617',
+  maxPixels: 1e9, fileFormat: 'GeoTIFF'
+});
+
+Export.image.toDrive({
+  image: post_med.select('NDVI'), description: 'P07_NDVI_post',
+  folder: EXPORT_FOLDER, fileNamePrefix: 'P07_NDVI_post',
+  region: AOI, scale: 10, crs: 'EPSG:32617',
+  maxPixels: 1e9, fileFormat: 'GeoTIFF'
+});
+
+Export.image.toDrive({
+  image: pre_med.select(['B4','B3','B2']).multiply(10000).toInt16(),
+  description: 'P07_RGB_pre',
+  folder: EXPORT_FOLDER, fileNamePrefix: 'P07_RGB_pre',
+  region: AOI, scale: 10, crs: 'EPSG:32617',
+  maxPixels: 1e9, fileFormat: 'GeoTIFF'
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// SECCIÓN 9: RESUMEN
+// ────────────────────────────────────────────────────────────────────────────
+
+print('============================================================');
+print('P07 — EXPORTACIONES LISTAS (pestaña Tasks)');
+print('============================================================');
+print('7 GeoTIFFs a 10 m, EPSG:32617:');
+print('  P07_dNDVI.tif      — cambio de vegetación (continuo)');
+print('  P07_dNBR.tif       — cambio biomasa/humedad (continuo)');
+print('  P07_dBSI.tif       — cambio suelo expuesto (continuo)');
+print('  P07_n_obs.tif      — conteo observaciones pre/post');
+print('  P07_NDVI_pre.tif   — NDVI pre-evento');
+print('  P07_NDVI_post.tif  — NDVI post-evento');
+print('  P07_RGB_pre.tif    — RGB pre-evento');
+print('------------------------------------------------------------');
+print('NOTA IMPORTANTE:');
+print('  Los mapas son CONTINUOS (sin clasificar).');
+print('  Los umbrales se determinan en P07b (Python) mediante');
+print('  análisis estadístico: valores en clústeres InSAR (P06)');
+print('  vs. puntos de control aleatorios.');
+print('  Ref: Notti et al. (2023, NHESS): "the threshold does not');
+print('  have a fixed value... manually determined after visual');
+print('  assessment and calibration."');
+print('============================================================');

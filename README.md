@@ -3,6 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
 [![Sentinel-1](https://img.shields.io/badge/Data-Sentinel--1-green.svg)](https://sentinel.esa.int/)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18930871.svg)](https://doi.org/10.5281/zenodo.18930871)
 
 ## Overview
 
@@ -165,6 +166,9 @@ Location: Ibarra, Ecuador
 If you use these scripts, please cite:
 
 > Pinto Páez, V. (under review). InSAR-based detection of landslide-induced surface displacement in tropical cloud forest: the December 2023 Intag event, Cotacachi, Ecuador. *Earth Sciences Research Journal*. *(DOI to be assigned upon acceptance)*
+
+**Scripts repository:**
+> Pinto Páez, V. (2026). *InSAR analysis scripts for Intag landslide detection, Ecuador (v1.0.0)*. Zenodo. https://doi.org/10.5281/zenodo.18930871
 
 ---
 
